@@ -2,66 +2,70 @@ const { ethers } = require('ethers');
 const fs = require('fs');
 const path = require('path');
 
+// Integration boundary: the blockchain team exports ABI + deployed address here.
 const CONTRACT_FILE = path.resolve(__dirname, '../../shared/DocumentRegistry.json');
 
 let provider = null;
 let contract = null;
+let loadedContractAddress = null;
 
-/**
- * (Re-)load the contract ABI + address from the shared JSON file.
- * Called lazily on every request so the backend picks up redeployments
- * without a restart (important after `npx hardhat node` restarts).
- */
 function loadContract() {
   try {
     if (!fs.existsSync(CONTRACT_FILE)) {
-      console.warn('[CHAIN] shared/DocumentRegistry.json not found — blockchain features disabled');
+      console.warn('[CHAIN] DocumentRegistry.json not found — blockchain features unavailable');
       contract = null;
+      loadedContractAddress = null;
       return null;
     }
 
-    const raw = fs.readFileSync(CONTRACT_FILE, 'utf-8');
-    const { abi, address } = JSON.parse(raw);
+    const raw = fs.readFileSync(CONTRACT_FILE, 'utf8');
+    const config = JSON.parse(raw);
+    const { abi, address } = config;
 
-    if (!abi || !address) {
-      console.warn('[CHAIN] DocumentRegistry.json missing abi or address');
+    if (!Array.isArray(abi) || abi.length === 0 || !address) {
+      console.warn('[CHAIN] DocumentRegistry.json has no usable ABI/address');
       contract = null;
+      loadedContractAddress = null;
       return null;
     }
 
     const rpcUrl = process.env.BLOCKCHAIN_RPC_URL || 'http://127.0.0.1:8545';
-    provider = new ethers.JsonRpcProvider(rpcUrl);
+    const privateKey = process.env.BLOCKCHAIN_PRIVATE_KEY;
 
-    // Use the first Hardhat default account as signer
-    const signer = new ethers.Wallet(
-      // Hardhat's default account #0 private key
-      '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
-      provider,
-    );
+    if (!privateKey) {
+      console.warn('[CHAIN] BLOCKCHAIN_PRIVATE_KEY is not set — blockchain writes unavailable');
+      contract = null;
+      loadedContractAddress = null;
+      return null;
+    }
 
+    // Reuse the provider unless the RPC URL changes.
+    if (!provider || provider._getConnection?.().url !== rpcUrl) {
+      provider = new ethers.JsonRpcProvider(rpcUrl);
+    }
+
+    const signer = new ethers.Wallet(privateKey, provider);
     contract = new ethers.Contract(address, abi, signer);
+    loadedContractAddress = address;
+
     return contract;
   } catch (err) {
     console.error('[CHAIN] Failed to load contract:', err.message);
     contract = null;
+    loadedContractAddress = null;
     return null;
   }
 }
 
-/** Get the contract instance (lazy-loads / reloads each call). */
 function getContract() {
+  // Reload the JSON on every call so a fresh Hardhat deployment is picked up.
   return loadContract();
 }
 
-// ─── Exported helpers ───────────────────────────────────────
-
-/**
- * Register a new document on-chain.
- * @returns {{ txHash: string } | null}
- */
 async function registerDocument(docId, docHash, uploaderId) {
   const c = getContract();
   if (!c) return null;
+
   try {
     const tx = await c.registerDocument(docId, docHash, uploaderId);
     await tx.wait();
@@ -72,35 +76,26 @@ async function registerDocument(docId, docHash, uploaderId) {
   }
 }
 
-/**
- * Verify a document's hash against the on-chain record.
- * @returns {{ verified: boolean, onChainHash: string } | null}
- */
 async function verifyDocument(docId, currentHash) {
   const c = getContract();
   if (!c) return null;
+
   try {
-    const result = await c.verifyDocument(docId, currentHash);
-    // Solidity may return a tuple (bool verified, string onChainHash)
-    // or the contract may just return bool — adapt to your ABI
-    if (typeof result === 'boolean') {
-      return { verified: result, onChainHash: 'N/A' };
-    }
-    // Assuming the contract returns [bool, string]
-    return { verified: result[0], onChainHash: result[1] };
+    const [verified, onChainHash] = await c.verifyDocument(docId, currentHash);
+    return {
+      verified: Boolean(verified),
+      onChainHash: String(onChainHash),
+    };
   } catch (err) {
     console.error('[CHAIN] verifyDocument failed:', err.message);
     return null;
   }
 }
 
-/**
- * Add a new version of a document on-chain.
- * @returns {{ txHash: string } | null}
- */
 async function addVersion(docId, newHash, reason, updatedBy) {
   const c = getContract();
   if (!c) return null;
+
   try {
     const tx = await c.addVersion(docId, newHash, reason, updatedBy);
     await tx.wait();
@@ -111,13 +106,16 @@ async function addVersion(docId, newHash, reason, updatedBy) {
   }
 }
 
-/**
- * Log an access event on-chain.
- * @returns {{ txHash: string } | null}
- */
 async function logAccess(docId, userId, action) {
+  const allowedActions = new Set(['view', 'download', 'share']);
+  if (!allowedActions.has(action)) {
+    console.warn(`[CHAIN] Skipping unsupported access action: ${action}`);
+    return null;
+  }
+
   const c = getContract();
   if (!c) return null;
+
   try {
     const tx = await c.logAccess(docId, userId, action);
     await tx.wait();
@@ -129,24 +127,61 @@ async function logAccess(docId, userId, action) {
 }
 
 /**
- * Get full document history from the chain (versions + access logs).
- * @returns {Array | null}
+ * The Solidity function returns TWO arrays:
+ *   [Version[], AccessLog[]]
+ *
+ * The backend API expects one flat array of:
+ *   { action, userId, timestamp }
+ *
+ * Convert both arrays here so route/frontend code does not need to know
+ * the Solidity tuple layout.
  */
 async function getDocumentHistory(docId) {
   const c = getContract();
   if (!c) return null;
+
   try {
-    const history = await c.getDocumentHistory(docId);
-    // Convert ethers Result objects to plain JS
-    return history.map((entry) => ({
-      action:    entry.action    || entry[2] || '',
-      userId:    entry.userId    || entry[1] || '',
-      timestamp: entry.timestamp
-        ? new Date(Number(entry.timestamp) * 1000).toISOString()
-        : entry[3]
-          ? new Date(Number(entry[3]) * 1000).toISOString()
+    const result = await c.getDocumentHistory(docId);
+    const versions = result[0] || [];
+    const accessLogs = result[1] || [];
+
+    const history = [];
+
+    for (const version of versions) {
+      const versionNumber = Number(version.version ?? version[0]);
+      const updatedBy = String(version.updatedBy ?? version[3] ?? '');
+      const timestampValue = version.timestamp ?? version[4];
+
+      history.push({
+        action: versionNumber === 1 ? 'registered' : 'version_added',
+        userId: updatedBy,
+        timestamp: timestampValue
+          ? new Date(Number(timestampValue) * 1000).toISOString()
           : '',
-    }));
+      });
+    }
+
+    for (const entry of accessLogs) {
+      const userId = String(entry.userId ?? entry[0] ?? '');
+      const action = String(entry.action ?? entry[1] ?? '');
+      const timestampValue = entry.timestamp ?? entry[2];
+
+      history.push({
+        action,
+        userId,
+        timestamp: timestampValue
+          ? new Date(Number(timestampValue) * 1000).toISOString()
+          : '',
+      });
+    }
+
+    history.sort((a, b) => {
+      const aTime = a.timestamp ? Date.parse(a.timestamp) : 0;
+      const bTime = b.timestamp ? Date.parse(b.timestamp) : 0;
+      return aTime - bTime;
+    });
+
+    return history;
   } catch (err) {
     console.error('[CHAIN] getDocumentHistory failed:', err.message);
     return null;
