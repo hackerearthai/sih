@@ -1,0 +1,5 @@
+{
+  "note": "This file is a placeholder. The smart contract team will replace it with the actual ABI + deployed contract address after running `npx hardhat node` and deploying the DocumentRegistry contract.",
+  "abi": [],
+  "address": ""
+}
