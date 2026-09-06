@@ -1,0 +1,8 @@
+.env
+node_modules/
+npm-debug.log*
+uploads/
+.local-postgres/
+.test-postgres/
+.test-uploads/
+dist/

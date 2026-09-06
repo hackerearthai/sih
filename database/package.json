@@ -1,0 +1,29 @@
+{
+  "name": "sih26190-database",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PostgreSQL schema, migrations, seed data, and client for SIH26190",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node scripts/dev.mjs",
+    "dev:local": "node scripts/dev.mjs --local",
+    "test": "node --test tests/integration.test.mjs tests/browser.test.mjs",
+    "build": "node ../frontend/node_modules/vite/bin/vite.js build --config vite.config.mjs",
+    "db:migrate": "node scripts/migrate.js",
+    "db:seed": "node scripts/seed.js",
+    "db:demo": "node scripts/demo-data.js",
+    "db:setup": "npm run db:migrate && npm run db:seed",
+    "check": "node --check src/client.js && node --check src/server.js && node --check src/workspace.js && node --check scripts/migrate.js && node --check scripts/seed.js && node --check scripts/demo-data.js && node --check scripts/dev.mjs && node --check scripts/local-postgres.mjs && node --check browser/api.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "pg": "^8.12.0"
+  },
+  "devDependencies": {
+    "embedded-postgres": "^18.4.0-beta.17"
+  }
+}
