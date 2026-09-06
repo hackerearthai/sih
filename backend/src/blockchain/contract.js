@@ -45,7 +45,11 @@ async function registerDocument(docId, docHash, uploaderId) {
 
 async function verifyDocument(docId, currentHash) {
   const [isValid, storedHash] = await requireContract().verifyDocument(docId, currentHash);
-  return { isValid, storedHash };
+
+  return {
+    verified: isValid,
+    onChainHash: storedHash,
+  };
 }
 
 async function addVersion(docId, newHash, reason, updatedBy) {
