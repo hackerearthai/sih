@@ -1,52 +1,32 @@
-const express = require('express');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const db = require('../db');
+const express = require("express");
+const jwt = require("jsonwebtoken");
+const { query } = require("../db");
 
 const router = express.Router();
+const JWT_SECRET = process.env.JWT_SECRET || "sih26190-development-secret";
 
-/**
- * POST /api/auth/login
- * Body: { username, password }
- * Returns: { token, role, userId }
- */
-router.post('/login', async (req, res) => {
+router.post("/login", async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: "username and password are required" });
+  }
   try {
-    const { username, password } = req.body;
-
-    if (!username || !password) {
-      return res.status(400).json({ error: 'username and password are required' });
-    }
-
-    // Look up user
-    const result = await db.query(
-      'SELECT "userId", username, "passwordHash", role FROM users WHERE username = $1',
-      [username],
+    const result = await query(
+      `SELECT user_id AS "userId", username, password, role FROM users WHERE username = $1`,
+      [username]
     );
-
-    if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-
     const user = result.rows[0];
-
-    // Compare password
-    const valid = await bcrypt.compare(password, user.passwordHash);
-    if (!valid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+    if (!user || user.password !== password) {
+      return res.status(401).json({ error: "Invalid username or password" });
     }
-
-    // Sign JWT (expires in 24h — plenty for a hackathon demo)
     const token = jwt.sign(
-      { userId: user.userId, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' },
+      { userId: user.userId, role: user.role, username: user.username },
+      JWT_SECRET,
+      { expiresIn: "8h" }
     );
-
-    return res.json({ token, role: user.role, userId: user.userId });
-  } catch (err) {
-    console.error('[AUTH] Login error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    res.json({ token, role: user.role, userId: user.userId });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
 
